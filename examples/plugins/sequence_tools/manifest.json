@@ -1,0 +1,11 @@
+{
+  "id": "org.supercalc.sequence-tools",
+  "name": "数列工具",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "entry": "main.scscript",
+  "description": "示例纯数学插件：三角数与前 n 项平方和。",
+  "permissions": [],
+  "modules": []
+}
+

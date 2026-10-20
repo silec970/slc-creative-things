@@ -1,0 +1,15 @@
+fn triangular(n) {
+    return n * (n + 1) / 2
+}
+
+fn square_sum(n) {
+    total := 0
+    for k in 1..n {
+        total := total + k^2
+    }
+    return total
+}
+
+assert triangular(10) == 55
+assert square_sum(10) == 385
+
