@@ -95,14 +95,40 @@ class ComputeClient(QObject):
         return True
 
     def run_workspace(self, workspace: Workspace, timeout_ms: int = 60_000) -> str:
+        return self._run_request(workspace, "workspace", timeout_ms=timeout_ms)
+
+    def run_cell(
+        self,
+        workspace: Workspace,
+        cell_id: str,
+        timeout_ms: int = 60_000,
+    ) -> str:
+        return self._run_request(
+            workspace,
+            "cell",
+            timeout_ms=timeout_ms,
+            cell_id=cell_id,
+        )
+
+    def _run_request(
+        self,
+        workspace: Workspace,
+        operation: str,
+        *,
+        timeout_ms: int,
+        cell_id: str | None = None,
+    ) -> str:
         request_id = str(uuid.uuid4())
         request = {
             "id": request_id,
-            "op": "workspace",
+            "op": operation,
             "title": workspace.title,
             "settings": workspace.settings.to_dict(),
             "cells": [cell.to_dict() for cell in workspace.cells],
+            "plugins": workspace.extra.get("plugins", []),
         }
+        if cell_id is not None:
+            request["cellId"] = cell_id
         self.pending = request_id
         self.pending_request = request
         self.used_fallback = False

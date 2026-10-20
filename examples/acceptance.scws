@@ -60,8 +60,7 @@
       "source": "",
       "tags": ["acceptance", "plot"],
       "plot": {
-        "expression": "sin(x)",
-        "variable": "x",
+        "equation": "y = sin(x)",
         "xMin": -6.283185307179586,
         "xMax": 6.283185307179586,
         "samples": 600,

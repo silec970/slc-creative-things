@@ -27,12 +27,14 @@ Qt：PySide6 6.11.2
 - 中文类型、舍入、算法、假设与计算状态显示
 - 104 个可调用内建函数与帮助文档清单一致性
 - 脚本编写指南的操作、作用域、循环、断言、模块和安全边界
+- 单单元运行、控制键加回车、函数目录插入覆盖
+- 隐式曲线、正切渐近线断开、稳定纵轴范围和鼠标拖动方向
 - socket 拦截下的离线计算和保存
 
 ## 当前结果
 
 ```text
-57 passed
+63 passed
 Ruff: All checks passed
 Mypy: Success: no issues found in 28 source files
 ```

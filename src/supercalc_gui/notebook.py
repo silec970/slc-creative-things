@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import math
 from typing import Any
 
+import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
@@ -38,12 +38,9 @@ class PlotView(QWidget):
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
-        self.expression = QLineEdit("sin(x)")
-        self.expression.setPlaceholderText("关于自变量的函数，例如 sin(x) 或 1/(1+x^2)")
-        self.expression.editingFinished.connect(self.changed)
-        self.variable = QLineEdit("x")
-        self.variable.setMaximumWidth(52)
-        self.variable.editingFinished.connect(self.changed)
+        self.equation = QLineEdit("y = sin(x)")
+        self.equation.setPlaceholderText("方程，例如 y = sin(x) 或 y^2 + x^2 = 1")
+        self.equation.editingFinished.connect(self.changed)
         self.x_min = QDoubleSpinBox()
         self.x_min.setRange(-1e9, 1e9)
         self.x_min.setValue(-10)
@@ -55,8 +52,8 @@ class PlotView(QWidget):
         self.x_max.setDecimals(4)
         self.x_max.valueChanged.connect(self.changed)
         self.kind = QComboBox()
-        self.kind.addItem("直角坐标 y=f(x)", "cartesian")
-        self.kind.addItem("极坐标 r=f(θ)", "polar")
+        self.kind.addItem("直角坐标或隐式曲线", "cartesian")
+        self.kind.addItem("极坐标曲线", "polar")
         self.kind.currentIndexChanged.connect(self.changed)
         self.plot_button = QPushButton("绘图")
         self.plot_button.setObjectName("primaryButton")
@@ -74,10 +71,8 @@ class PlotView(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(6)
-        controls.addWidget(QLabel("函数"))
-        controls.addWidget(self.expression, 1)
-        controls.addWidget(QLabel("变量"))
-        controls.addWidget(self.variable)
+        controls.addWidget(QLabel("方程"))
+        controls.addWidget(self.equation, 1)
         controls.addWidget(QLabel("范围"))
         controls.addWidget(self.x_min)
         controls.addWidget(QLabel("—"))
@@ -130,8 +125,7 @@ class PlotView(QWidget):
 
     def to_config(self) -> dict[str, Any]:
         return PlotSpec(
-            expression=self.expression.text(),
-            variable=self.variable.text().strip() or "x",
+            equation=self.equation.text(),
             x_min=self.x_min.value(),
             x_max=self.x_max.value(),
             kind=str(self.kind.currentData()),
@@ -139,8 +133,7 @@ class PlotView(QWidget):
 
     def load_config(self, data: dict[str, Any]) -> None:
         spec = PlotSpec.from_dict(data)
-        self.expression.setText(spec.expression)
-        self.variable.setText(spec.variable)
+        self.equation.setText(spec.equation)
         self.x_min.setValue(spec.x_min)
         self.x_max.setValue(spec.x_max)
         index = self.kind.findData(spec.kind)
@@ -156,29 +149,99 @@ class PlotView(QWidget):
             return
         self.axes.clear()
         self.axes.grid(True, alpha=0.25)
-        if samples.x:
+        if samples.kind in {"explicit", "polar"} and samples.x:
+            x_values = np.asarray(samples.x, dtype=float)
+            y_values = np.asarray(samples.y, dtype=float)
             if samples.kind == "polar":
-                theta = samples.x
-                radius = samples.y
-                x_values = [r * math.cos(t) for t, r in zip(theta, radius, strict=True)]
-                y_values = [r * math.sin(t) for t, r in zip(theta, radius, strict=True)]
-                self.axes.plot(x_values, y_values, color="#1769aa", linewidth=1.8)
+                theta = x_values
+                radius = y_values
+                x_plot = radius * np.cos(theta)
+                y_plot = radius * np.sin(theta)
+                finite = np.isfinite(x_plot) & np.isfinite(y_plot)
+                x_plot = np.ma.masked_where(~finite, x_plot)
+                y_plot = np.ma.masked_where(~finite, y_plot)
+                self.axes.plot(x_plot, y_plot, color="#1769aa", linewidth=1.8)
+                x_limits = self._robust_limits(np.ma.compressed(x_plot))
+                y_limits = self._robust_limits(np.ma.compressed(y_plot))
+                self.axes.set_xlim(*x_limits)
+                self.axes.set_ylim(*y_limits)
                 self.axes.set_aspect("equal", adjustable="datalim")
             else:
-                self.axes.plot(samples.x, samples.y, color="#1769aa", linewidth=1.8)
+                self.axes.plot(
+                    x_values,
+                    self._masked_tan_style_discontinuities(y_values),
+                    color="#1769aa",
+                    linewidth=1.8,
+                )
+                self.axes.set_xlim(spec.x_min, spec.x_max)
+                y_limits = self._robust_limits(y_values)
+                self.axes.set_ylim(*y_limits)
                 self.axes.axhline(0, color="#7f8a9a", linewidth=0.7)
                 self.axes.axvline(0, color="#7f8a9a", linewidth=0.7)
-            self.axes.set_title(samples.expression, fontsize=10)
+            self.axes.set_title(samples.equation, fontsize=10)
             self.axes.tick_params(labelsize=8)
             self.figure.tight_layout()
             self.canvas.draw_idle()
             self._home_limits = (self.axes.get_xlim(), self.axes.get_ylim())
             messages = [d.message for d in samples.diagnostics if d.severity == "warning"]
             self.status.setText(" · ".join(messages) if messages else "采样完成，可缩放和平移。")
+        elif samples.kind == "implicit" and samples.grid_x:
+            grid_x = np.asarray(samples.grid_x, dtype=float)
+            grid_y = np.asarray(samples.grid_y, dtype=float)
+            grid_z = np.asarray(samples.grid_z, dtype=float)
+            grid_z = np.ma.masked_where(np.abs(grid_z) > 1e12, grid_z)
+            self.axes.contour(
+                grid_x,
+                grid_y,
+                grid_z,
+                levels=[0],
+                colors=["#1769aa"],
+                linewidths=1.8,
+            )
+            self.axes.set_xlim(spec.x_min, spec.x_max)
+            self.axes.set_ylim(spec.x_min, spec.x_max)
+            self.axes.set_aspect("equal", adjustable="box")
+            self.axes.set_title(samples.equation, fontsize=10)
+            self.axes.tick_params(labelsize=8)
+            self.figure.tight_layout()
+            self.canvas.draw_idle()
+            self._home_limits = (self.axes.get_xlim(), self.axes.get_ylim())
+            messages = [d.message for d in samples.diagnostics if d.severity == "warning"]
+            self.status.setText(
+                " · ".join(messages) if messages else "隐式曲线采样完成，可缩放和平移。"
+            )
         else:
             reason = samples.diagnostics[0].message if samples.diagnostics else "没有可绘制的数据"
             self.status.setText(reason)
             self.canvas.draw_idle()
+
+    def _robust_limits(self, values: np.ndarray) -> tuple[float, float]:
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return (-1.0, 1.0)
+        low, high = np.percentile(finite, [5, 95])
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            center = float(np.nanmedian(finite))
+            span = max(1.0, abs(center) * 0.2)
+            return center - span, center + span
+        padding = (high - low) * 0.15
+        return float(low - padding), float(high + padding)
+
+    def _masked_tan_style_discontinuities(self, values: np.ndarray) -> np.ma.MaskedArray:
+        mask = ~np.isfinite(values)
+        if values.size > 1:
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                low, high = np.percentile(finite, [5, 95])
+                threshold = max(float((high - low) * 4), 1e-9)
+                mask |= values > high + threshold
+                mask |= values < low - threshold
+                jumps = np.abs(np.diff(values))
+                jump_indices = np.where(np.isfinite(jumps) & (jumps > threshold))[0]
+                for index in jump_indices:
+                    mask[index] = True
+                    mask[index + 1] = True
+        return np.ma.masked_where(mask, values)
 
     def export_image(self, format_name: str) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -231,7 +294,7 @@ class PlotView(QWidget):
         x_span = x_limits[1] - x_limits[0]
         y_span = y_limits[1] - y_limits[0]
         shift_x = -delta_x / max(1.0, bbox.width) * x_span
-        shift_y = delta_y / max(1.0, bbox.height) * y_span
+        shift_y = -delta_y / max(1.0, bbox.height) * y_span
         self.axes.set_xlim(x_limits[0] + shift_x, x_limits[1] + shift_x)
         self.axes.set_ylim(y_limits[0] + shift_y, y_limits[1] + shift_y)
         self.canvas.draw_idle()
@@ -546,10 +609,18 @@ class NotebookView(QWidget):
     def to_cells(self) -> list[Cell]:
         return [widget.to_cell() for widget in self.cells]
 
-    def set_results(self, runs: list[dict[str, Any]]) -> None:
+    def set_results(
+        self,
+        runs: list[dict[str, Any]],
+        *,
+        clear_missing: bool = True,
+    ) -> None:
         by_id = {str(run.get("cellId")): run for run in runs}
         for widget in self.cells:
-            widget.set_result(by_id.get(widget.cell.id))
+            if widget.cell.id in by_id:
+                widget.set_result(by_id[widget.cell.id])
+            elif clear_missing:
+                widget.set_result(None)
 
     def _renumber(self) -> None:
         for index, widget in enumerate(self.cells):

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QSizePolicy,
     QSpinBox,
     QStatusBar,
@@ -50,6 +51,7 @@ from supercalc_core.workspace import (
 
 from .client import ComputeClient
 from .command_palette import Command, CommandPalette
+from .function_catalog import FunctionCatalogDialog
 from .gui_text import (
     algorithm_name,
     angle_name,
@@ -96,6 +98,9 @@ class MainWindow(QMainWindow):
         self.recovery = RecoveryStore()
         self._busy = False
         self._run_document: Document | None = None
+        self._run_scope = "workspace"
+        self._run_cell_id: str | None = None
+        self._last_focused_cell_id: str | None = None
         self._last_results: dict[str, dict[str, Any]] = {}
         self._last_diagnostics: list[tuple[str, dict[str, Any]]] = []
         self.client = ComputeClient(self)
@@ -115,6 +120,9 @@ class MainWindow(QMainWindow):
         self._autosave_timer.timeout.connect(self._autosave)
         self._autosave_timer.start()
         self.new_document()
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.focusChanged.connect(self._track_editor_focus)
         QTimer.singleShot(350, self._check_recovery)
 
     def _build_actions(self) -> None:
@@ -132,9 +140,10 @@ class MainWindow(QMainWindow):
         self.action_paste = self._action("粘贴", QKeySequence.StandardKey.Paste, self.paste)
         self.action_copy_latex = self._action("复制公式源码", "Ctrl+Shift+C", self.copy_latex)
         self.action_run = self._action("运行全部", "F5", self.run_all)
-        self.action_run_cell = self._action("运行当前单元", "Ctrl+Return", self.run_all)
+        self.action_run_cell = self._action("运行当前单元", "Ctrl+Return", self.run_current_cell)
         self.action_cancel = self._action("取消计算", "Shift+F5", self.cancel_run)
         self.action_palette = self._action("命令面板…", "Ctrl+Shift+P", self.show_palette)
+        self.action_function_catalog = self._action("函数大全", "", self.show_function_catalog)
         self.action_plugins = self._action("本地插件…", "", self.show_plugins)
         self.action_help_guide = self._action("界面与按钮说明", "F1", self.show_interface_guide)
         self.action_function_help = self._action("内置函数参考", "F2", self.show_function_reference)
@@ -210,6 +219,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.steps_action)
 
         tools_menu = self.menuBar().addMenu("工具")
+        tools_menu.addAction(self.action_function_catalog)
         tools_menu.addAction(self.action_plugins)
 
         help_menu = self.menuBar().addMenu("帮助")
@@ -252,6 +262,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.steps_check)
         toolbar.addSeparator()
         toolbar.addAction(self.action_palette)
+        toolbar.addAction(self.action_function_catalog)
         toolbar.addAction(self.action_plugins)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -327,7 +338,7 @@ class MainWindow(QMainWindow):
         document = Document(workspace=workspace, view=view, path=path, modified=modified)
         self._register_document_view(view, document)
         view.changed.connect(lambda doc=document: self._document_changed(doc))
-        view.runCell.connect(lambda _cell_id, doc=document: self._run_document_now(doc))
+        view.runCell.connect(lambda cell_id, doc=document: self._run_cell_now(doc, cell_id))
         view.showAst.connect(self.show_ast)
         index = self.tabs.addTab(view, workspace.title)
         self.tabs.setCurrentIndex(index)
@@ -450,15 +461,56 @@ class MainWindow(QMainWindow):
         if document is not None:
             self._run_document_now(document)
 
+    def run_current_cell(self) -> None:
+        document = self.current_document()
+        if document is None:
+            return
+        target = self._last_focused_cell_id
+        if target is None or not any(cell.cell.id == target for cell in document.view.cells):
+            target = document.view.cells[0].cell.id if document.view.cells else None
+        if target is not None:
+            self._run_cell_now(document, target)
+
+    def _track_editor_focus(self, _old: QWidget | None, new: QWidget | None) -> None:
+        if new is None:
+            return
+        document = self.current_document()
+        if document is None:
+            return
+        for cell in document.view.cells:
+            editors: list[QPlainTextEdit] = []
+            if cell.formula is not None:
+                editors.append(cell.formula.editor)
+            if cell.text_editor is not None:
+                editors.append(cell.text_editor)
+            for editor in editors:
+                if new is editor or editor.isAncestorOf(new):
+                    self._last_focused_cell_id = cell.cell.id
+                    return
+
     def _run_document_now(self, document: Document) -> None:
         if self._busy:
             return
         document.workspace.cells = document.view.to_cells()
         self._busy = True
         self._run_document = document
+        self._run_scope = "workspace"
+        self._run_cell_id = None
         self.action_run.setEnabled(False)
         self.status_algorithm.setText("计算中…")
         self.client.run_workspace(document.workspace)
+
+    def _run_cell_now(self, document: Document, cell_id: str) -> None:
+        if self._busy:
+            return
+        document.workspace.cells = document.view.to_cells()
+        self._busy = True
+        self._run_document = document
+        self._run_scope = "cell"
+        self._run_cell_id = cell_id
+        self.action_run.setEnabled(False)
+        self.status_algorithm.setText("正在运行当前单元…")
+        self.client.run_cell(document.workspace, cell_id)
 
     def cancel_run(self) -> None:
         if self._busy:
@@ -474,10 +526,15 @@ class MainWindow(QMainWindow):
         if document is None:
             return
         runs = response.get("runs", [])
-        document.view.set_results(runs)
-        self._last_results = {
+        clear_missing = self._run_scope == "workspace"
+        document.view.set_results(runs, clear_missing=clear_missing)
+        current_results = {
             str(run.get("cellId")): run for run in runs if run.get("result") is not None
         }
+        if clear_missing:
+            self._last_results = current_results
+        else:
+            self._last_results.update(current_results)
         history_data = response.get("history", [])
         if history_data:
             document.workspace.history.extend(HistoryEntry.from_dict(item) for item in history_data)
@@ -493,6 +550,8 @@ class MainWindow(QMainWindow):
         )
         if document.workspace.extra.get("pluginErrors"):
             self.status_algorithm.setText("有插件未加载，请查看诊断")
+        self._run_scope = "workspace"
+        self._run_cell_id = None
         document.modified = True
         for index in range(self.tabs.count()):
             if getattr(self.tabs.widget(index), "_supercalc_document", None) is document:
@@ -928,6 +987,44 @@ class MainWindow(QMainWindow):
             commands.append(Command(action.text().replace("&", ""), shortcut, action.trigger))
         dialog = CommandPalette(commands, self)
         dialog.exec()
+
+    def show_function_catalog(self) -> None:
+        document = self.current_document()
+        if document is None:
+            return
+        target_id = self._last_focused_cell_id
+        if target_id is None or not any(cell.cell.id == target_id for cell in document.view.cells):
+            target_id = next(
+                (
+                    cell.cell.id
+                    for cell in document.view.cells
+                    if cell.formula is not None or cell.text_editor is not None
+                ),
+                None,
+            )
+        editor = None
+        for cell in document.view.cells:
+            if cell.cell.id != target_id:
+                continue
+            editor = cell.formula.editor if cell.formula is not None else cell.text_editor
+            break
+        if editor is None:
+            QMessageBox.information(
+                self,
+                "函数大全",
+                "请先把光标放到公式或脚本单元中，再选择函数。",
+            )
+            return
+        dialog = FunctionCatalogDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected is None:
+            return
+        template = dialog.selected
+        cursor = editor.textCursor()
+        cursor.insertText(template.insert_text)
+        cursor.setPosition(max(cursor.position() - template.caret_from_end, 0))
+        editor.setTextCursor(cursor)
+        editor.setFocus()
+        self.status_algorithm.setText(f"已插入函数模板：{template.name}")
 
     def show_ast(self, source: str) -> None:
         try:

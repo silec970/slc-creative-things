@@ -35,3 +35,13 @@ def test_polar_plot() -> None:
     )
     assert len(samples.x) == 40
     assert all(abs(value - 1.0) < 1e-9 for value in samples.y)
+
+
+def test_implicit_circle_plot() -> None:
+    samples = sample_plot(
+        Engine(),
+        PlotSpec(equation="y^2 + x^2 = 1", x_min=-2, x_max=2, samples=200),
+    )
+    assert samples.kind == "implicit"
+    assert len(samples.grid_x) >= 120
+    assert samples.grid_z

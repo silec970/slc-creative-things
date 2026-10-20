@@ -32,6 +32,7 @@ def process_request(request: dict[str, Any]) -> dict[str, Any]:
             title=str(request.get("title", "worker")),
             settings=settings,
             cells=cells,
+            extra={"plugins": list(request.get("plugins", []))},
         )
         engine, runs = run_workspace(workspace)
         payload_runs = []
@@ -52,6 +53,48 @@ def process_request(request: dict[str, Any]) -> dict[str, Any]:
             runs=payload_runs,
             environment=engine.snapshot().to_dict(),
             history=[entry.to_dict() for entry in workspace.history],
+        )
+    if operation == "cell":
+        cells = [Cell.from_dict(item) for item in request.get("cells", [])]
+        target_id = str(request.get("cellId", ""))
+        target_index = next(
+            (index for index, cell in enumerate(cells) if cell.id == target_id),
+            -1,
+        )
+        if target_index < 0:
+            return _response(request_id, False, error="找不到要运行的单元。")
+        workspace = Workspace(
+            title=str(request.get("title", "worker")),
+            settings=settings,
+            cells=cells[: target_index + 1],
+            extra={"plugins": list(request.get("plugins", []))},
+        )
+        engine, runs = run_workspace(workspace)
+        if not runs or runs[-1].cell.id != target_id:
+            last = runs[-1] if runs else None
+            reason = (
+                last.diagnostics()[0].message
+                if last is not None and last.diagnostics()
+                else "目标单元之前的单元执行失败。"
+            )
+            return _response(request_id, False, error=reason)
+        target_run = runs[-1]
+        payload = {
+            "cellId": target_run.cell.id,
+            "kind": target_run.cell.kind,
+            "ok": target_run.ok,
+            "result": target_run.result.to_dict() if target_run.result else None,
+            "script": target_run.script_result.to_dict() if target_run.script_result else None,
+        }
+        target_history = [
+            entry.to_dict() for entry in workspace.history if entry.cell_id == target_id
+        ]
+        return _response(
+            request_id,
+            True,
+            runs=[payload],
+            environment=engine.snapshot().to_dict(),
+            history=target_history,
         )
     if operation == "ping":
         return _response(request_id, True, version="0.1.0")

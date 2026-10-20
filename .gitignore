@@ -7,6 +7,7 @@ __pycache__/
 build/
 dist/
 dist-staging/
+dist-staging*/
 build-staging-*/
 *.spec.bak
 *.scws.autosave

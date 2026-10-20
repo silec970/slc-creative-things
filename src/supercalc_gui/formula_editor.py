@@ -8,7 +8,6 @@ from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
-    QKeyEvent,
     QPainter,
     QPixmap,
     QSyntaxHighlighter,
@@ -76,16 +75,6 @@ class _MathHighlighter(QSyntaxHighlighter):
 
 class FormulaTextEdit(QPlainTextEdit):
     runRequested = Signal()
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if (
-            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
-        ):
-            self.runRequested.emit()
-            event.accept()
-            return
-        super().keyPressEvent(event)
 
 
 class FormulaPreview(QWidget):
